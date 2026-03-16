@@ -4,67 +4,121 @@ const Order = require("../models/Order");
 const Shop = require("../models/Shop");
 const Commission = require("../models/Commission");
 const { auth, adminOnly } = require("../middleware/auth");
+const mongoose = require("mongoose");
+
+// Helper: check if a string is a valid MongoDB ObjectId
+function isValidObjectId(id) {
+  return id && typeof id === "string" && /^[a-fA-F0-9]{24}$/.test(id.trim());
+}
 
 // PLACE ORDER
 router.post("/", auth, async (req, res) => {
   try {
-    const { shopId, items, subtotal, deliveryFee, tax, discount, totalAmount, paymentMethod, deliveryAddress, notes } = req.body;
-    if (!items || items.length === 0) return res.status(400).json({ message: "No items in order" });
-    
+    const {
+      shopId, items, subtotal, deliveryFee, tax,
+      discount, totalAmount, paymentMethod, deliveryAddress, notes
+    } = req.body;
+
+    // Validate items
+    if (!items || items.length === 0) {
+      return res.status(400).json({ message: "No items in order" });
+    }
+
+    // Validate required amounts
+    if (subtotal == null || totalAmount == null) {
+      return res.status(400).json({ message: "subtotal and totalAmount are required" });
+    }
+
     let shop = null;
+    let finalShopId = null;
     let commissionRate = 10;
-    
-    // Try to find shop - if shopId is empty, find shop from first product
-    if (shopId) {
-      shop = await Shop.findById(shopId);
+
+    // Only query DB for shop if shopId is a valid ObjectId — empty string causes CastError
+    if (isValidObjectId(shopId)) {
+      try {
+        shop = await Shop.findById(shopId.trim());
+        if (shop) finalShopId = shop._id;
+      } catch (e) {
+        console.warn("Shop lookup failed:", e.message);
+      }
     }
-    
-    // If still no shop found, create order without shop validation
-    let finalShopId = shopId;
+
+    // If no valid shop found, fall back to any approved shop
     if (!shop) {
-      // Find any approved shop to associate with
-      shop = await Shop.findOne({ isApproved: true });
-      if (shop) finalShopId = shop._id;
+      try {
+        shop = await Shop.findOne({ isApproved: true });
+        if (shop) finalShopId = shop._id;
+      } catch (e) {
+        console.warn("Fallback shop lookup failed:", e.message);
+      }
     }
-    
+
     if (shop) commissionRate = shop.commission || 10;
-    const commissionAmount = Math.round((subtotal * commissionRate) / 100);
-    const shopEarning = subtotal - commissionAmount;
-    
+    const commissionAmount = Math.round(((subtotal || 0) * commissionRate) / 100);
+    const shopEarning = (subtotal || 0) - commissionAmount;
+
+    // Sanitize items — product field must be valid ObjectId or null
+    const sanitizedItems = items.map(item => ({
+      product: isValidObjectId(item.product) ? item.product.trim() : undefined,
+      name: item.name || "Unknown",
+      price: Number(item.price) || 0,
+      quantity: Number(item.quantity) || 1,
+      image: item.image || ""
+    }));
+
     const orderData = {
       customer: req.user.id,
-      items, subtotal,
-      deliveryFee: deliveryFee || 0,
-      tax: tax || 0,
-      discount: discount || 0,
+      items: sanitizedItems,
+      subtotal: Number(subtotal) || 0,
+      deliveryFee: Number(deliveryFee) || 0,
+      tax: Number(tax) || 0,
+      discount: Number(discount) || 0,
       commission: commissionAmount,
-      totalAmount,
-      paymentMethod: paymentMethod || "COD",
+      totalAmount: Number(totalAmount) || 0,
+      paymentMethod: ["COD", "ONLINE", "UPI"].includes(paymentMethod) ? paymentMethod : "COD",
       paymentStatus: "pending",
-      deliveryAddress,
+      deliveryAddress: deliveryAddress || {},
       notes: notes || "",
       tracking: [{ status: "placed", message: "Order placed successfully" }]
     };
-    
+
     if (finalShopId) orderData.shop = finalShopId;
-    
+
     const order = new Order(orderData);
     const saved = await order.save();
-    
-    // Create commission record
+
+    // Create commission record only if we have a valid shop
     if (finalShopId) {
-      await new Commission({
-        order: saved._id, shop: finalShopId,
-        orderAmount: subtotal, commissionRate,
-        commissionAmount, shopEarning
-      }).save();
-      await Shop.findByIdAndUpdate(finalShopId, { $inc: { totalOrders: 1 } });
+      try {
+        await new Commission({
+          order: saved._id,
+          shop: finalShopId,
+          orderAmount: subtotal,
+          commissionRate,
+          commissionAmount,
+          shopEarning
+        }).save();
+        await Shop.findByIdAndUpdate(finalShopId, { $inc: { totalOrders: 1 } });
+      } catch (e) {
+        // Commission creation failure should NOT fail the order
+        console.warn("Commission record failed (non-fatal):", e.message);
+      }
     }
-    
+
     res.status(201).json({ message: "Order placed", order: saved });
-  } catch (err) { 
-    console.error("Order error:", err);
-    res.status(500).json({ message: err.message }); 
+  } catch (err) {
+    console.error("Order error:", err.name, err.message);
+    // Give a clear message for Mongoose cast errors
+    if (err.name === "CastError") {
+      return res.status(400).json({
+        message: `Invalid ID format for field: ${err.path}. Value received: "${err.value}"`
+      });
+    }
+    if (err.name === "ValidationError") {
+      const messages = Object.values(err.errors).map(e => e.message).join(", ");
+      return res.status(400).json({ message: `Validation failed: ${messages}` });
+    }
+    res.status(500).json({ message: err.message });
   }
 });
 
@@ -130,11 +184,13 @@ router.put("/:id/status", auth, async (req, res) => {
     if (status === "delivered") {
       order.deliveredAt = new Date();
       order.paymentStatus = order.paymentMethod === "COD" ? "paid" : order.paymentStatus;
-      await Commission.findOneAndUpdate({ order: order._id }, { status: "paid", paidAt: new Date() });
+      await Commission.findOneAndUpdate(
+        { order: order._id },
+        { status: "paid", paidAt: new Date() }
+      );
       await Shop.findByIdAndUpdate(order.shop, { $inc: { totalRevenue: order.subtotal } });
     }
     await order.save();
-    // Emit socket event
     const io = req.app.get("io");
     if (io) io.emit("orderUpdate", { orderId: order._id, status, tracking: order.tracking });
     res.json({ message: "Status updated", order });
