@@ -24,7 +24,7 @@ const orderSchema = new mongoose.Schema({
   discount: { type: Number, default: 0 },
   commission: { type: Number, default: 0 },
   totalAmount: { type: Number, required: true },
-  paymentMethod: { type: String, enum: ["COD", "ONLINE"], default: "COD" },
+  paymentMethod: { type: String, enum: ["COD", "ONLINE", "UPI"], default: "COD" },
   paymentStatus: { type: String, enum: ["pending", "paid", "failed", "refunded"], default: "pending" },
   paymentId: String,
   razorpayOrderId: String,
@@ -46,7 +46,7 @@ const orderSchema = new mongoose.Schema({
   cancelReason: String
 }, { timestamps: true });
 
-orderSchema.pre("save", async function(next) {
+orderSchema.pre("save", function(next) {
   if (!this.orderNumber) {
     this.orderNumber = "NRZ" + Date.now().toString().slice(-8);
   }
