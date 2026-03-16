@@ -46,11 +46,11 @@ const orderSchema = new mongoose.Schema({
   cancelReason: String
 }, { timestamps: true });
 
-orderSchema.pre("save", function(next) {
+// Fixed for Mongoose v7+ — use async function, no next() callback needed
+orderSchema.pre("save", async function() {
   if (!this.orderNumber) {
     this.orderNumber = "NRZ" + Date.now().toString().slice(-8);
   }
-  next();
 });
 
 module.exports = mongoose.model("Order", orderSchema);
