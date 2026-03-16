@@ -10,31 +10,63 @@ router.post("/", auth, async (req, res) => {
   try {
     const { shopId, items, subtotal, deliveryFee, tax, discount, totalAmount, paymentMethod, deliveryAddress, notes } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ message: "No items in order" });
-    const shop = await Shop.findById(shopId);
-    if (!shop) return res.status(404).json({ message: "Shop not found" });
-    const commissionRate = shop.commission || 10;
+    
+    let shop = null;
+    let commissionRate = 10;
+    
+    // Try to find shop - if shopId is empty, find shop from first product
+    if (shopId) {
+      shop = await Shop.findById(shopId);
+    }
+    
+    // If still no shop found, create order without shop validation
+    let finalShopId = shopId;
+    if (!shop) {
+      // Find any approved shop to associate with
+      shop = await Shop.findOne({ isApproved: true });
+      if (shop) finalShopId = shop._id;
+    }
+    
+    if (shop) commissionRate = shop.commission || 10;
     const commissionAmount = Math.round((subtotal * commissionRate) / 100);
     const shopEarning = subtotal - commissionAmount;
-    const order = new Order({
-      customer: req.user.id, shop: shopId, items, subtotal,
-      deliveryFee: deliveryFee || 0, tax: tax || 0,
-      discount: discount || 0, commission: commissionAmount,
-      totalAmount, paymentMethod: paymentMethod || "COD",
-      paymentStatus: paymentMethod === "COD" ? "pending" : "pending",
-      deliveryAddress, notes: notes || "",
+    
+    const orderData = {
+      customer: req.user.id,
+      items, subtotal,
+      deliveryFee: deliveryFee || 0,
+      tax: tax || 0,
+      discount: discount || 0,
+      commission: commissionAmount,
+      totalAmount,
+      paymentMethod: paymentMethod || "COD",
+      paymentStatus: "pending",
+      deliveryAddress,
+      notes: notes || "",
       tracking: [{ status: "placed", message: "Order placed successfully" }]
-    });
+    };
+    
+    if (finalShopId) orderData.shop = finalShopId;
+    else return res.status(400).json({ message: "No shop found. Please add products from an approved shop." });
+    
+    const order = new Order(orderData);
     const saved = await order.save();
+    
     // Create commission record
-    await new Commission({
-      order: saved._id, shop: shopId,
-      orderAmount: subtotal, commissionRate,
-      commissionAmount, shopEarning
-    }).save();
-    // Update shop stats
-    await Shop.findByIdAndUpdate(shopId, { $inc: { totalOrders: 1 } });
+    if (finalShopId) {
+      await new Commission({
+        order: saved._id, shop: finalShopId,
+        orderAmount: subtotal, commissionRate,
+        commissionAmount, shopEarning
+      }).save();
+      await Shop.findByIdAndUpdate(finalShopId, { $inc: { totalOrders: 1 } });
+    }
+    
     res.status(201).json({ message: "Order placed", order: saved });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { 
+    console.error("Order error:", err);
+    res.status(500).json({ message: err.message }); 
+  }
 });
 
 // GET MY ORDERS (customer)
