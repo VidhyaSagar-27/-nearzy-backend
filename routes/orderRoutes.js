@@ -47,7 +47,6 @@ router.post("/", auth, async (req, res) => {
     };
     
     if (finalShopId) orderData.shop = finalShopId;
-    else return res.status(400).json({ message: "No shop found. Please add products from an approved shop." });
     
     const order = new Order(orderData);
     const saved = await order.save();

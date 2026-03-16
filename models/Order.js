@@ -15,8 +15,8 @@ const trackingSchema = new mongoose.Schema({
 
 const orderSchema = new mongoose.Schema({
   orderNumber: { type: String, unique: true },
-  customer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-  shop: { type: mongoose.Schema.Types.ObjectId, ref: "Shop", required: true },
+  customer: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  shop: { type: mongoose.Schema.Types.ObjectId, ref: "Shop" },
   items: [orderItemSchema],
   subtotal: { type: Number, required: true },
   deliveryFee: { type: Number, default: 0 },
