@@ -30,7 +30,7 @@ const orderSchema = new mongoose.Schema({
   razorpayOrderId: String,
   orderStatus: {
     type: String,
-    enum: ["placed", "confirmed", "preparing", "ready", "picked", "delivered", "cancelled"],
+    enum: ["placed", "confirmed", "preparing", "ready", "picked", "on_the_way", "delivered", "cancelled"],
     default: "placed"
   },
   deliveryPartner: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
@@ -46,7 +46,7 @@ const orderSchema = new mongoose.Schema({
   cancelReason: String
 }, { timestamps: true });
 
-// Fixed for Mongoose v7+ — use async function, no next() callback needed
+// Fixed for Mongoose v7+ — async, no next() needed
 orderSchema.pre("save", async function() {
   if (!this.orderNumber) {
     this.orderNumber = "NRZ" + Date.now().toString().slice(-8);
