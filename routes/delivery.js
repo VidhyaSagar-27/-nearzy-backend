@@ -1,71 +1,15 @@
 "use strict";
-const router = require("express").Router();
-const { protect, authorize } = require("../middleware/auth");
-const { Order, User } = require("../models");
-
-/* GET /api/delivery/orders — delivery partner sees available orders */
-router.get("/orders", protect, authorize("delivery","admin"), async (req, res) => {
-  try {
-    const orders = await Order.find({
-      orderStatus: { $in: ["ready","picked","on_the_way"] }
-    }).populate("user","name phone").populate("shop","name address contact").sort({ createdAt: -1 }).limit(50);
-    res.json({ success: true, orders });
-  } catch (e) { res.status(500).json({ message: e.message }); }
-});
-
-/* GET /api/delivery/my-orders — delivery partner's assigned orders */
-router.get("/my-orders", protect, authorize("delivery","admin"), async (req, res) => {
-  try {
-    const orders = await Order.find({ "deliveryPartner.userId": req.user._id })
-      .populate("user","name phone").populate("shop","name address").sort({ createdAt: -1 });
-    res.json({ success: true, orders });
-  } catch (e) { res.status(500).json({ message: e.message }); }
-});
-
-/* PUT /api/delivery/orders/:id/accept */
-router.put("/orders/:id/accept", protect, authorize("delivery","admin"), async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-    order.deliveryPartner = {
-      userId: req.user._id,
-      name: req.user.name,
-      phone: req.user.phone
-    };
-    order.orderStatus = "picked";
-    order.statusHistory.push({ status: "picked", note: "Picked up by delivery partner" });
-    await order.save();
-    if (global.io) global.io.to(`order_${order._id}`).emit("status_update", { status: "picked" });
-    res.json({ success: true, order });
-  } catch (e) { res.status(500).json({ message: e.message }); }
-});
-
-/* PUT /api/delivery/orders/:id/location */
-router.put("/orders/:id/location", protect, authorize("delivery","admin"), async (req, res) => {
-  try {
-    const { lat, lng } = req.body;
-    if (global.io) global.io.to(`order_${req.params.id}`).emit("location_update", { lat, lng });
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ message: e.message }); }
-});
-
-/* PUT /api/delivery/orders/:id/delivered */
-router.put("/orders/:id/delivered", protect, authorize("delivery","admin"), async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id).populate("user");
-    if (!order) return res.status(404).json({ message: "Order not found" });
-    order.orderStatus = "delivered";
-    order.deliveredAt = new Date();
-    order.statusHistory.push({ status: "delivered", note: "Delivered successfully" });
-    await order.save();
-    if (global.io) global.io.to(`order_${order._id}`).emit("status_update", { status: "delivered" });
-    // Award loyalty points
-    const pts = Math.floor((order.pricing?.total || 0) * 2);
-    if (pts > 0) {
-      await User.findByIdAndUpdate(order.user._id, { $inc: { "loyalty.points": pts, "loyalty.lifetime": pts } });
-    }
-    res.json({ success: true, order });
-  } catch (e) { res.status(500).json({ message: e.message }); }
-});
-
-module.exports = router;
+const router=require("express").Router();
+const auth=require("../middleware/auth");
+const mongoose=require("mongoose");
+const dpSchema=new mongoose.Schema({ user:{type:mongoose.Types.ObjectId,ref:"User",unique:true}, isAvailable:{type:Boolean,default:false}, rating:{type:Number,default:4.5}, totalDeliveries:{type:Number,default:0}, totalEarnings:{type:Number,default:0}, vehicleType:String, vehicleNumber:String, updatedAt:{type:Date,default:Date.now} });
+const DeliveryProfile=mongoose.models.DeliveryProfile||mongoose.model("DeliveryProfile",dpSchema);
+router.put("/profile",auth,async(req,res)=>{try{const{vehicleType,vehicleNumber,isAvailable}=req.body;const uid=req.user._id||req.user.id;const p=await DeliveryProfile.findOneAndUpdate({user:uid},{...(vehicleType&&{vehicleType}),...(vehicleNumber&&{vehicleNumber}),...(isAvailable!==undefined&&{isAvailable}),updatedAt:new Date()},{upsert:true,new:true});res.json(p);}catch(e){res.status(500).json({error:e.message});}});
+router.get("/profile",auth,async(req,res)=>{try{const uid=req.user._id||req.user.id;let p=await DeliveryProfile.findOne({user:uid});if(!p)p=await DeliveryProfile.create({user:uid});res.json(p);}catch(e){res.status(500).json({error:e.message});}});
+router.get("/earnings",auth,async(req,res)=>{try{const p=await DeliveryProfile.findOne({user:req.user._id||req.user.id});res.json({totalDeliveries:p?.totalDeliveries||0,totalEarnings:p?.totalEarnings||0,todayEarnings:0,rating:p?.rating||4.5});}catch(e){res.status(500).json({error:e.message});}});
+router.put("/availability",auth,async(req,res)=>{try{const{isAvailable}=req.body;const p=await DeliveryProfile.findOneAndUpdate({user:req.user._id||req.user.id},{isAvailable,updatedAt:new Date()},{upsert:true,new:true});res.json(p);}catch(e){res.status(500).json({error:e.message});}});
+router.put("/accept/:orderId",auth,async(req,res)=>{try{const{Order}=require("./orders");const o=await Order.findByIdAndUpdate(req.params.orderId,{deliveryPartner:req.user._id||req.user.id,orderStatus:"picked"},{new:true});res.json(o);}catch(e){res.status(500).json({error:e.message});}});
+router.put("/pickup/:orderId",auth,async(req,res)=>{try{const{Order}=require("./orders");const o=await Order.findByIdAndUpdate(req.params.orderId,{orderStatus:"picked"},{new:true});if(global.io)global.io.to(`order_${o._id}`).emit("order_status",{status:"picked"});res.json(o);}catch(e){res.status(500).json({error:e.message});}});
+router.put("/on-the-way/:orderId",auth,async(req,res)=>{try{const{Order}=require("./orders");const o=await Order.findByIdAndUpdate(req.params.orderId,{orderStatus:"on_the_way"},{new:true});if(global.io)global.io.to(`order_${o._id}`).emit("order_status",{status:"on_the_way"});res.json(o);}catch(e){res.status(500).json({error:e.message});}});
+router.put("/delivered/:orderId",auth,async(req,res)=>{try{const{Order}=require("./orders");const o=await Order.findByIdAndUpdate(req.params.orderId,{orderStatus:"delivered",updatedAt:new Date()},{new:true});if(global.io)global.io.to(`order_${o._id}`).emit("order_status",{status:"delivered"});await DeliveryProfile.findOneAndUpdate({user:req.user._id||req.user.id},{$inc:{totalDeliveries:1,totalEarnings:40}});res.json(o);}catch(e){res.status(500).json({error:e.message});}});
+module.exports=router;
